@@ -1,0 +1,417 @@
+---
+title: "Processing Hospitalization Data and Incorporating Rural-Urban Indicators"
+author: "Peter Tran"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+```
+
+# Processing hospitalization data
+
+```{r}
+hos <- read_csv("../../data/raw/Hospital_Inpatient_Discharges__SPARCS_De-Identified___2017.csv")
+```
+
+```{r}
+unique(hos$`Age Group`)
+```
+
+Let's change the value of `70 or Older` to `70+` for ease of use.
+
+```{r}
+hos <- mutate(hos, `Age Group`=replace(`Age Group`, `Age Group` == "70 or Older", "70+"))
+unique(hos$`Age Group`)
+```
+We'll also rename the `Zip Code - 3 digits` column to just `Zip Code`.
+
+```{r}
+hos <- rename(hos, `Zip Code`=`Zip Code - 3 digits`)
+```
+
+```{r}
+unique(hos$`Zip Code`)
+```
+
+We'll remove `NA` and `OOS` zip codes as we need the zip codes.
+
+```{r}
+hos <- hos %>%
+  drop_na(`Zip Code`) %>%
+  filter(`Zip Code` != "OOS")
+
+unique(hos$`Zip Code`)
+```
+
+```{r}
+unique(hos$`Length of Stay`)
+```
+
+Ok, `120 +` means that the most information we have on that patient is that they stayed for 120 days, but we don't know how much longer before they were discharged; therefore, we have to right censor them. We'll give those patients a `Censor` value of `1` and we'll make their LOS just `120`.
+
+```{r}
+hos <- hos %>%
+  mutate(Censor=ifelse(`Length of Stay` == "120 +", 1, 0)) %>%
+  mutate(`Length of Stay`=as.integer(replace(`Length of Stay`, `Length of Stay` == "120 +", 120)))
+
+unique(hos$`Length of Stay`)
+unique(hos$Censor)
+```
+
+```{r}
+hos %>%
+  count(`APR MDC Code`) %>%
+  arrange(desc(n))
+```
+
+`15` DRG codes are all newborns. We'll omit them from our analyses.
+
+```{r}
+hos <- filter(hos, `APR MDC Code` != "15")
+
+hos %>%
+  count(`APR MDC Code`) %>%
+  arrange(desc(n))
+```
+
+We'll remove any `00` DRG codes because we can't be sure any of those aren't newborns.
+
+```{r}
+hos <- filter(hos, `APR MDC Code` != "00")
+unique(hos$`APR MDC Code`)
+```
+
+```{r}
+unique(hos$`APR Severity of Illness Code`)
+```
+
+`0` codes for severity of illness shouldn't exist; we'll remove those.
+
+```{r}
+hos <- filter(hos, `APR Severity of Illness Code` != "0")
+unique(hos$`APR Severity of Illness Code`)
+```
+
+```{r}
+unique(hos$`Type of Admission`)
+```
+
+We need to know what the type of admission is, so we'll remove the `Not Available` ones.
+
+```{r}
+hos <- filter(hos, `Type of Admission` != "Not Available")
+unique(hos$`Type of Admission`)
+```
+
+```{r}
+unique(hos$`Payment Typology 1`)
+```
+
+We'll need to do some processing of the payments. All we care about is whether or not a patient had insurance. In order to do this, we just want to know if insurance is a part of the first payment typology. So first we'll remove any cases of `Unknown`, `Managed Care, Unspecified`, and `Miscellaneous/Other` since we can't know what those are.
+
+```{r}
+hos <- filter(hos, !(`Payment Typology 1` %in% c("Unknown", "Managed Care, Unspecified", "Miscellaneous/Other")))
+unique(hos$`Payment Typology 1`)
+```
+
+Ok, now we know if the first payment typology is `Self-Pay`, that means the patient did not have insurance. We can make a new variable to represent that.
+
+```{r}
+hos <- mutate(hos, Insurance=ifelse(`Payment Typology 1` == "Self-Pay", 0, 1))
+unique(hos$Insurance)
+```
+# Processing rural urban continuum codes
+
+RUCCs are obtained from the [USDA](https://www.ers.usda.gov/data-products/rural-urban-continuum-codes.aspx), where it ranges from 1-9 with 1 being the most urban and 9 being the most rural. It's defined at the county level.
+
+```{r}
+library(gridExtra)
+library(readxl)
+library(sf)
+library(tigris)
+library(zipcodeR)
+```
+```{r}
+options(tigris_use_cache=T)
+```
+
+```{r}
+rucc <- read_excel("../../data/raw/ruralurbancodes2013.xls") %>%
+  mutate(FIPS=as.integer(FIPS))
+```
+
+```{r}
+unique(rucc$RUCC_2013)
+```
+
+Yeah, we gotta remove those `NA` values.
+
+```{r}
+rucc <- drop_na(rucc, `RUCC_2013`)
+
+rucc %>%
+  filter(State == "NY") %>%
+  ggplot(aes(x=factor(`RUCC_2013`))) +
+  geom_bar() +
+  ggtitle("RUCC by county")
+```
+
+Ok, this is where things get tricky. Since the RUCCs are for county-level FIPS codes and the hospitalization data are for first three digit zip codes, we have to do some sort of spatial join. Since our first three digit zip codes are larger than counties, our strategy will be to do a spatial join to figure out which county belongs to which first three digit zip code based on the largest overlap of the county's area. Then we'll take the average of the RUCCs associated with each three digit zip code and round it to the nearest valid integer.
+
+First, we only need to get counties and zip codes from New York state.
+
+```{r}
+counties <- counties(state="NY") %>%
+  mutate(GEOID=as.integer(GEOID))
+  
+
+ny_zips <- search_state("NY")
+zips <- zctas() %>%
+  filter(ZCTA5CE10 %in% ny_zips$zipcode) %>%
+  left_join(ny_zips, by=c("ZCTA5CE10"="zipcode"))
+```
+
+```{r}
+zips$fst3 <- str_sub(zips$ZCTA5CE10, 1, 3)
+
+length(unique(zips$fst3))
+```
+
+Ok, let's do a spatial union of the zip codes so we can have single geometries for the first three digit zip codes. This takes a little while to run, about 5 minutes or so.
+
+```{r}
+fst3_zips <- zips %>%
+  group_by(fst3) %>%
+  summarize(geometry=st_sf(st_union(geometry)), population=sum(population), area=sum(land_area_in_sqmi)) %>%
+  mutate(density=population/area)
+```
+
+Now we can do a spatial join of those first three digit zip codes with counties to figure out which counties overlap which three digit zip codes the most. Since we no longer need it, we can drop the geometry to save processing time. Next we'll join that with the RUCCs. Then we'll group the first three digit zip codes and find the mean RUCC and round it.
+
+```{r}
+fst3_zips_rucc <- st_join(fst3_zips, counties, left=F) %>%
+  st_drop_geometry() %>%
+  inner_join(rucc, by=c("GEOID"="FIPS")) %>%
+  group_by(fst3) %>%
+  summarize(RUCC=round(mean(`RUCC_2013`)))
+```
+
+```{r}
+ggplot(fst3_zips_rucc, aes(x=RUCC)) +
+  geom_bar() +
+  ggtitle("RUCC distribution by first three digit zip code")
+```
+
+It's interesting that this doesn't have a similar distribution to the RUCC bar plot above. Let's map those RUCCs to see what is happening.
+
+```{r, fig.height=10, fig.width=20}
+rucc_county_g <- inner_join(counties, rucc, by=c("GEOID"="FIPS")) %>%
+  st_sf() %>%
+  ggplot(aes(fill=`RUCC_2013`)) +
+  geom_sf() +
+  ggtitle("RUCC by county")
+
+rucc_fst3_g <- inner_join(fst3_zips_rucc, fst3_zips, by="fst3") %>%
+  st_sf() %>%
+  ggplot(aes(fill=RUCC)) +
+  geom_sf() +
+  ggtitle("RUCC by first three digit zip code")
+
+grid.arrange(rucc_county_g, rucc_fst3_g, ncol=2)
+```
+
+From these two maps we can see how a lot of more rural counties are getting "eaten up" when converted to first three digit zip codes.
+
+Finally we can join the RUCC with the hospitalization data.
+
+```{r}
+hos <- inner_join(hos, fst3_zips_rucc, by=c("Zip Code"="fst3"))
+ggplot(hos, aes(x=RUCC)) +
+  geom_bar() +
+  ggtitle("RUCC distribution by hospitalization")
+```
+
+```{r}
+hos %>%
+  group_by(RUCC) %>%
+  summarize(n=n())
+```
+
+Wow, looks like the vast majority of patients are from highly urban areas. I suppose if you consider that NYC is included in this data, then that would make sense.
+
+# Processing NCHS urban-rural classification codes
+
+The [NCHS urban-rural classification scheme](https://www.cdc.gov/nchs/data_access/urban_rural.htm) ranges from 1-6 with 1 being the most urban and 6 being the most rural. It's defined at the county level as well.
+
+The processing we'll have to do for this will be similar to the RUCCs.
+
+```{r}
+nchs <- read_excel("../../data/raw/NCHSURCodes2013.xlsx")
+```
+
+```{r}
+nchs %>%
+  filter(`State Abr.` == "NY") %>%
+  ggplot(aes(x=factor(`2013 code`))) +
+  geom_bar() +
+  ggtitle("NCHS code by county")
+```
+
+```{r}
+fst3_zips_nchs <- st_join(fst3_zips, counties, left=F) %>%
+  st_drop_geometry() %>%
+  inner_join(nchs, by=c("GEOID"="FIPS code")) %>%
+  group_by(fst3) %>%
+  summarize(NCHS=round(mean(`2013 code`)))
+```
+
+```{r}
+ggplot(fst3_zips_nchs, aes(x=NCHS)) +
+  geom_bar() +
+  ggtitle("NCHS code distribution by first three digit zip code")
+```
+
+Looks like the NCHS codes are much more evenly distributed than the RUCCs.
+
+```{r, fig.height=10, fig.width=20}
+nchs_county_g <- inner_join(counties, nchs, by=c("GEOID"="FIPS code")) %>%
+  st_sf() %>%
+  ggplot(aes(fill=`2013 code`)) +
+  geom_sf() +
+  ggtitle("NCHS code by county")
+
+nchs_fst3_g <- inner_join(fst3_zips_nchs, fst3_zips, by="fst3") %>%
+  st_sf() %>%
+  ggplot(aes(fill=NCHS)) +
+  geom_sf() +
+  ggtitle("NCHS code by first three digit zip code")
+
+grid.arrange(nchs_county_g, nchs_fst3_g, ncol=2)
+```
+
+NCHS codes shrink much more than RUCCs after doing the spatial join.
+
+```{r}
+hos <- inner_join(hos, fst3_zips_nchs, by=c("Zip Code"="fst3"))
+ggplot(hos, aes(x=NCHS)) +
+  geom_bar() +
+  ggtitle("NCHS code distribution by hospitalization")
+```
+
+```{r}
+hos %>%
+  group_by(NCHS) %>%
+  summarize(n=n())
+```
+
+Much less drastic than RUCCs. Not sure if that represent's New York's population well.
+
+# Processing rural-urban commuting area codes
+
+RUCA codes are obtained from the [USDA](https://www.ers.usda.gov/data-products/rural-urban-commuting-area-codes/), where it ranges from 1-10 with 1 being the most urban and 10 being the most rural. It's defined at the tract level.
+
+```{r}
+ruca <- read_excel("../../data/raw/ruca2010revised.xlsx", skip=1) %>%
+  rename(FIPS=4) %>%
+  rename(RUCA=5) %>%
+  mutate(FIPS=as.numeric(FIPS))
+
+tracts <- tracts(state="NY") %>%
+  mutate(GEOID=as.numeric(GEOID))
+```
+
+```{r}
+unique(ruca$RUCA)
+```
+
+We need to remove `99`, that's not real.
+
+```{r}
+ruca <- filter(ruca, RUCA != "99")
+
+ruca %>%
+  filter(`Select State` == "NY") %>%
+  ggplot(aes(x=factor(RUCA))) +
+  geom_bar() +
+  ggtitle("RUCA code by tract")
+```
+
+```{r}
+ruca_county_g <- inner_join(tracts, ruca, by=c("GEOID"="FIPS")) %>%
+  ggplot(aes(fill=RUCA)) +
+  geom_sf() +
+  ggtitle("RUCA code by county")
+
+ruca_county_g
+```
+
+Wow, this level of detail is awesome.
+
+Now we can do the spatial join.
+
+```{r}
+fst3_zips_ruca <- st_join(fst3_zips, tracts, left=F) %>%
+  st_drop_geometry() %>%
+  inner_join(ruca, by=c("GEOID"="FIPS")) %>%
+  group_by(fst3) %>%
+  summarize(RUCA=round(mean(RUCA)))
+```
+
+```{r}
+ggplot(fst3_zips_ruca, aes(x=RUCA)) +
+  geom_bar() +
+  ggtitle("RUCA code distribution by first three digit zip code")
+```
+
+```{r, fig.height=10, fig.width=20}
+ruca_fst3_g <- inner_join(fst3_zips_ruca, fst3_zips, by="fst3") %>%
+  st_sf() %>%
+  ggplot(aes(fill=RUCA)) +
+  geom_sf() +
+  ggtitle("RUCA code by first three digit zip code")
+
+grid.arrange(ruca_county_g, ruca_fst3_g, ncol=2)
+```
+
+This looks like a pretty dang good approximation at the three digit zip code level! This one might be the best one we have.
+
+```{r}
+hos <- inner_join(hos, fst3_zips_ruca, by=c("Zip Code"="fst3"))
+ggplot(hos, aes(x=RUCA)) +
+  geom_bar() +
+  ggtitle("RUCA code distribution by hospitalization")
+```
+
+```{r}
+hos %>%
+  group_by(RUCA) %>%
+  summarize(n=n())
+```
+
+This one probably has the most extreme disproportionality, but it might be the best fit for the data.
+
+# Processing population density at the three digit zip code level
+
+Since there are a couple issues with using the these codes we defined above, we'll also create a new metric which we can use to model ruralness.
+
+```{r}
+library(foreign)
+```
+
+Our strategy will be to directly calculate the population densities for the first three digit zip codes (which we did earlier when processing the zip codes) in population per square mile, and simply use that in our model. It will be less interpretable, but perhaps the most accurate.
+
+```{r}
+hos <- fst3_zips %>%
+  st_drop_geometry() %>%
+  inner_join(hos, by=c("fst3"="Zip Code"))
+```
+
+```{r}
+dir.create("../../data/processed/", showWarnings=F)
+
+hos %>%
+  rename_with(~ tolower(gsub(" ", "_", .x))) %>%
+  rename("apr_severity_description"="apr_severity_of_illness_description") %>%
+  write.foreign(datafile="../../data/processed/hospitalization.csv", codefile="../../data/processed/hospitalization.sas", package="SAS")
+```
