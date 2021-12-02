@@ -341,7 +341,7 @@ ruca %>%
 ruca_county_g <- inner_join(tracts, ruca, by=c("GEOID"="FIPS")) %>%
   ggplot(aes(fill=RUCA)) +
   geom_sf() +
-  ggtitle("RUCA code by county")
+  ggtitle("RUCA code by tract")
 
 ruca_county_g
 ```
@@ -414,4 +414,6 @@ hos %>%
   rename_with(~ tolower(gsub(" ", "_", .x))) %>%
   rename("apr_severity_description"="apr_severity_of_illness_description") %>%
   write.foreign(datafile="../../data/processed/hospitalization.csv", codefile="../../data/processed/hospitalization.sas", package="SAS")
+
+write_rds(hos, "../../data/processed/hospitalization.rds")
 ```
