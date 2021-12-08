@@ -1,0 +1,81 @@
+---
+title: "Checking PH assumptions"
+author: "Peter Tran"
+output: html_document
+---
+
+```{r}
+library(survival)
+library(tidyverse)
+```
+
+Reading in the data.
+
+```{r}
+los <- read_rds("../../data/processed/hospitalization.rds") %>% mutate(event = ifelse(Censor == 1, 0, 1))
+```
+
+Defining the model.
+
+```{r}
+model <- coxph(Surv(`Length of Stay`, event) ~ RUCA + `Age Group` + Race + Ethnicity + `APR Risk of Mortality` + `APR Severity of Illness Code` + Insurance + Gender + `Type of Admission` + `APR Medical Surgical Description`, data = los)
+model
+```
+
+Checking Schoenfeld residuals.
+
+```{r}
+cox.zph(model)
+```
+
+Plotting Schoenfeld residuals.
+
+```{r}
+plot(cox.zph(model), var = 1, col = "red")
+abline(h = coef(model)[1], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 2, col = "red")
+abline(h = coef(model)[2], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 3, col = "red")
+abline(h = coef(model)[3], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 4, col = "red")
+abline(h = coef(model)[4], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 5, col = "red")
+abline(h = coef(model)[5], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 6, col = "red")
+abline(h = coef(model)[6], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 7, col = "red")
+abline(h = coef(model)[7], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 8, col = "red")
+abline(h = coef(model)[8], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 9, col = "red")
+abline(h = coef(model)[9], col = "blue")
+```
+
+```{r}
+plot(cox.zph(model), var = 10, col = "red")
+abline(h = coef(model)[10], col = "blue")
+```
